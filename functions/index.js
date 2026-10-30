@@ -174,3 +174,108 @@ exports.sendReviewLikeNotification = onDocumentCreated(
         }
     }
 );
+
+exports.sendReviewCommentNotification = onDocumentCreated(
+    'comments/{commentId}',
+    async (event) => {
+        const commentId = event.params.commentId;
+        const commentData = event.data?.data();
+
+        if (!commentData) {
+            logger.info('El comentario no contiene datos.', { commentId });
+            return;
+        }
+
+        const reviewId = commentData.reviewId;
+        const commenterId = commentData.userId;
+
+        if (!reviewId || !commenterId) {
+            logger.info('El comentario no incluye la reseña o el autor.', { commentId });
+            return;
+        }
+
+        const reviewDocument = await db.collection('reviews').doc(reviewId).get();
+
+        if (!reviewDocument.exists) {
+            logger.info('No existe la reseña que recibió el comentario.', {
+                commentId,
+                reviewId,
+            });
+            return;
+        }
+
+        const reviewOwnerId = reviewDocument.data().userId;
+
+        if (!reviewOwnerId || reviewOwnerId === commenterId) {
+            logger.info('No se envía notificación para un comentario propio o sin autor.', {
+                commentId,
+                reviewId,
+                commenterId,
+            });
+            return;
+        }
+
+        const reviewOwnerDocument = await db.collection('users').doc(reviewOwnerId).get();
+
+        if (!reviewOwnerDocument.exists) {
+            logger.info('No existe el usuario autor de la reseña.', {
+                commentId,
+                reviewId,
+                reviewOwnerId,
+            });
+            return;
+        }
+
+        const reviewOwnerData = reviewOwnerDocument.data();
+        if (reviewOwnerData.notificationPreferences?.reviewComments !== true) {
+            logger.info('El usuario tiene desactivadas las notificaciones de comentarios.', {
+                commentId,
+                reviewId,
+                reviewOwnerId,
+            });
+            return;
+        }
+
+        const reviewOwnerToken = reviewOwnerData.fcmToken;
+        if (!reviewOwnerToken) {
+            logger.info('El autor de la reseña no tiene un token FCM registrado.', {
+                commentId,
+                reviewId,
+                reviewOwnerId,
+            });
+            return;
+        }
+
+        const commenter = commentData.user || {};
+        const commenterName = commenter.name || commenter.username || commenterId;
+        const message = {
+            token: reviewOwnerToken,
+            notification: {
+                title: 'Nuevo comentario',
+                body: `${commenterName} comentó tu reseña.`,
+            },
+            data: {
+                reviewId,
+                commentId,
+            },
+        };
+
+        try {
+            await admin.messaging().send(message);
+            logger.info('Se envió la notificación de comentario en reseña.', {
+                commentId,
+                reviewId,
+                reviewOwnerId,
+                commenterId,
+            });
+        } catch (error) {
+            logger.error('No se pudo enviar la notificación de comentario en reseña.', {
+                commentId,
+                reviewId,
+                reviewOwnerId,
+                commenterId,
+                error,
+            });
+        }
+    }
+);
