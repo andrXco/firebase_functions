@@ -33,10 +33,17 @@ coverage
 # nyc test coverage
 .nyc_output
 
+<<<<<<< HEAD
 # Grunt intermediate storage (http://gruntjs.com/creating-plugins#storing-task-files)
 .grunt
 
 # Bower dependency directory (https://bower.io/)
+=======
+# Grunt intermediate storage (http://gruntjs.com/creating-plugins.html)
+.grunt
+
+# Bower dependency directory (http://bower.io/)
+>>>>>>> origin/main
 bower_components
 
 # node-waf configuration
