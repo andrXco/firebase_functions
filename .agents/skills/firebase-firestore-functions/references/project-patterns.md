@@ -17,6 +17,8 @@ These notes reflect the repository source inspected on 2026-10-23. The source of
 - `updateUserInfoInReviews` listens to `users/{userId}` updates. It compares `avatarUrl` before and after, then queries `reviews` where `userId == userId` and updates `user.avatarUrl`. Writes are chunked into batches of at most 500.
 - `sendFollowNotification` listens to creation of `users/{userId}/followers/{followerId}`. It loads both user documents, checks `users/{userId}.notificationPreferences.newFollowers === true`, then sends to `users/{userId}.fcmToken`.
 - `sendReviewLikeNotification` listens to creation of `reviews/{reviewId}/likes/{likerId}`. It loads the review, resolves the owner from `reviews/{reviewId}.userId`, skips missing/self likes, checks `users/{ownerId}.notificationPreferences.likesReceived === true`, then sends to the owner's `fcmToken`.
+- `sendNewReviewFromFollowingNotification` listens to creation of `reviews/{reviewId}`. It pages through `users/{authorId}/followers`, checks each follower's `notificationPreferences.newReviewsFromFollowing === true`, deduplicates FCM tokens, and sends multicast batches capped at 500 tokens.
+- `ProfileNotificationPreferences` stores `newReviewsFromFollowing` alongside `newFollowers`, `reviewComments`, and `likesReceived`; the Android profile editor persists the option under `users/{userId}.notificationPreferences`.
 - Follower and liker display names prefer `name`, then `username`, then the document ID.
 - The like notification includes `reviewId` in its FCM `data` payload. FCM data values must be strings; preserve this when adding fields.
 - Current handlers log failures but do not clear invalid tokens or configure explicit retry behavior. Do not assume either behavior exists.

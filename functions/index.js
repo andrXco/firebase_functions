@@ -280,3 +280,116 @@ exports.sendReviewCommentNotification = onDocumentCreated(
     }
 );
 
+exports.sendNewReviewFromFollowingNotification = onDocumentCreated(
+    'reviews/{reviewId}',
+    async (event) => {
+        const reviewId = event.params.reviewId;
+        const reviewData = event.data?.data();
+
+        if (!reviewData) {
+            logger.info('La reseña no contiene datos.', { reviewId });
+            return;
+        }
+
+        const authorId = reviewData.userId;
+        if (typeof authorId !== 'string' || authorId.length === 0) {
+            logger.info('La reseña no incluye el ID de su autor.', { reviewId });
+            return;
+        }
+
+        const author = reviewData.user || {};
+        const authorNameCandidate = author.name || reviewData.authorName || author.username;
+        const authorName = typeof authorNameCandidate === 'string'
+            ? authorNameCandidate
+            : authorId;
+        const followersRef = db.collection('users').doc(authorId).collection('followers');
+        const messaging = admin.messaging();
+        const sentTokens = new Set();
+        let followerCursor = null;
+        let eligibleTokenCount = 0;
+        let successCount = 0;
+        let failureCount = 0;
+
+        while (true) {
+            let followersQuery = followersRef
+                .orderBy(admin.firestore.FieldPath.documentId())
+                .limit(500);
+
+            if (followerCursor) {
+                followersQuery = followersQuery.startAfter(followerCursor);
+            }
+
+            const followersSnapshot = await followersQuery.get();
+            if (followersSnapshot.empty) {
+                break;
+            }
+
+            const followerDocuments = followersSnapshot.docs.filter(
+                (followerDocument) => followerDocument.id !== authorId
+            );
+            const followerUsers = followerDocuments.length > 0
+                ? await db.getAll(...followerDocuments.map(
+                    (followerDocument) => db.collection('users').doc(followerDocument.id)
+                ))
+                : [];
+
+            const tokens = followerUsers
+                .filter((followerUser) => followerUser.exists)
+                .filter((followerUser) => {
+                    const preferences = followerUser.data().notificationPreferences;
+                    return preferences?.newReviewsFromFollowing === true;
+                })
+                .map((followerUser) => followerUser.data().fcmToken)
+                .filter((token) => typeof token === 'string' && token.length > 0)
+                .filter((token) => {
+                    if (sentTokens.has(token)) {
+                        return false;
+                    }
+                    sentTokens.add(token);
+                    return true;
+                });
+
+            eligibleTokenCount += tokens.length;
+
+            if (tokens.length > 0) {
+                try {
+                    const response = await messaging.sendEachForMulticast({
+                        tokens,
+                        notification: {
+                            title: 'Nueva reseña',
+                            body: `${authorName} publicó una reseña nueva.`,
+                        },
+                        data: {
+                            reviewId,
+                            authorId,
+                        },
+                    });
+                    successCount += response.successCount;
+                    failureCount += response.failureCount;
+                } catch (error) {
+                    failureCount += tokens.length;
+                    logger.error('No se pudieron enviar notificaciones de nueva reseña.', {
+                        reviewId,
+                        authorId,
+                        tokenCount: tokens.length,
+                        error,
+                    });
+                }
+            }
+
+            followerCursor = followersSnapshot.docs[followersSnapshot.docs.length - 1];
+            if (followersSnapshot.size < 500) {
+                break;
+            }
+        }
+
+        logger.info('Se procesaron las notificaciones de nueva reseña.', {
+            reviewId,
+            authorId,
+            eligibleTokenCount,
+            successCount,
+            failureCount,
+        });
+    }
+);
+
