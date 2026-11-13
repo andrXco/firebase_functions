@@ -1,10 +1,99 @@
-const { onDocumentCreated, onDocumentUpdated } = require('firebase-functions/v2/firestore');
+const {
+    onDocumentCreated,
+    onDocumentUpdated,
+    onDocumentWritten,
+} = require('firebase-functions/v2/firestore');
+const { onCall, HttpsError } = require('firebase-functions/v2/https');
 const logger = require('firebase-functions/logger');
 const admin = require('firebase-admin');
 
 admin.initializeApp();
 
 const db = admin.firestore();
+
+const PROFILE_SYNC_BATCH_SIZE = 450;
+const MAX_NEARBY_RADIUS_METERS = 100000;
+const MAX_NEARBY_RESULTS = 50;
+const EARTH_RADIUS_METERS = 6371000;
+
+async function syncUserSnapshotCollection(collectionName, userId, name, username) {
+    let cursor = null;
+    let updatedCount = 0;
+
+    while (true) {
+        let query = db.collection(collectionName)
+            .where('userId', '==', userId)
+            .limit(PROFILE_SYNC_BATCH_SIZE);
+
+        if (cursor) {
+            query = query.startAfter(cursor);
+        }
+
+        const snapshot = await query.get();
+        if (snapshot.empty) {
+            break;
+        }
+
+        const batch = db.batch();
+        let batchUpdateCount = 0;
+
+        snapshot.docs.forEach((document) => {
+            const documentData = document.data();
+            const currentUser = documentData.user || {};
+            const nextUser = {
+                ...currentUser,
+                name,
+                username,
+            };
+            const updates = {};
+
+            if (currentUser.name !== name || currentUser.username !== username) {
+                updates.user = nextUser;
+            }
+
+            if (collectionName === 'reviews' && documentData.authorName !== name) {
+                updates.authorName = name;
+            }
+
+            if (Object.keys(updates).length > 0) {
+                batch.update(document.ref, updates);
+                batchUpdateCount += 1;
+            }
+        });
+
+        if (batchUpdateCount > 0) {
+            await batch.commit();
+            updatedCount += batchUpdateCount;
+        }
+
+        cursor = snapshot.docs[snapshot.docs.length - 1];
+        if (snapshot.size < PROFILE_SYNC_BATCH_SIZE) {
+            break;
+        }
+    }
+
+    return updatedCount;
+}
+
+function distanceBetweenMeters(latitudeA, longitudeA, latitudeB, longitudeB) {
+    const toRadians = (degrees) => degrees * Math.PI / 180;
+    const latitudeDelta = toRadians(latitudeB - latitudeA);
+    const longitudeDelta = toRadians(longitudeB - longitudeA);
+    const startLatitude = toRadians(latitudeA);
+    const endLatitude = toRadians(latitudeB);
+    const haversine = Math.sin(latitudeDelta / 2) ** 2 +
+        Math.cos(startLatitude) * Math.cos(endLatitude) *
+        Math.sin(longitudeDelta / 2) ** 2;
+
+    return 2 * EARTH_RADIUS_METERS * Math.asin(Math.sqrt(Math.min(1, haversine)));
+}
+
+function isValidCoordinate(latitude, longitude) {
+    return Number.isFinite(latitude) &&
+        Number.isFinite(longitude) &&
+        Math.abs(latitude) <= 90 &&
+        Math.abs(longitude) <= 180;
+}
 
 exports.updateUserInfoInReviews = onDocumentUpdated('users/{userId}', async (event) => {
     const userId = event.params.userId;
@@ -392,4 +481,189 @@ exports.sendNewReviewFromFollowingNotification = onDocumentCreated(
         });
     }
 );
+
+exports.syncUserProfileSnapshots = onDocumentUpdated(
+    { document: 'users/{userId}', retry: true },
+    async (event) => {
+    const userId = event.params.userId;
+    const beforeData = event.data.before.data();
+    const afterData = event.data.after.data();
+    const nameChanged = beforeData.name !== afterData.name;
+    const usernameChanged = beforeData.username !== afterData.username;
+
+    if (!nameChanged && !usernameChanged) {
+        return;
+    }
+
+    const name = typeof afterData.name === 'string' ? afterData.name.trim() : '';
+    const username = typeof afterData.username === 'string'
+        ? afterData.username.trim()
+        : '';
+    const displayName = name || username || userId;
+
+    const [reviewCount, commentCount] = await Promise.all([
+        syncUserSnapshotCollection('reviews', userId, displayName, username),
+        syncUserSnapshotCollection('comments', userId, displayName, username),
+    ]);
+
+    logger.info('Se sincronizaron los nombres del perfil en contenido existente.', {
+        userId,
+        reviewCount,
+        commentCount,
+    });
+    }
+);
+
+exports.syncPlaceReviewStats = onDocumentWritten(
+    {
+        document: 'reviews/{reviewId}',
+        retry: true,
+        maxInstances: 1,
+        concurrency: 1,
+    },
+    async (event) => {
+        const beforeData = event.data?.before.exists ? event.data.before.data() : null;
+        const afterData = event.data?.after.exists ? event.data.after.data() : null;
+        const ratingChanged = beforeData?.rating !== afterData?.rating;
+        const placeChanged = beforeData?.placeId !== afterData?.placeId;
+
+        if (!ratingChanged && !placeChanged) {
+            return;
+        }
+
+        const affectedPlaceIds = new Set(
+            [beforeData?.placeId, afterData?.placeId]
+                .filter((placeId) => typeof placeId === 'string' && placeId.length > 0)
+        );
+
+        for (const placeId of affectedPlaceIds) {
+            const placeReference = db.collection('places').doc(placeId);
+            const placeDocument = await placeReference.get();
+
+            if (!placeDocument.exists) {
+                logger.info('No se recalcularon estadísticas porque el lugar no existe.', {
+                    placeId,
+                    reviewId: event.params.reviewId,
+                });
+                continue;
+            }
+
+            const reviewsSnapshot = await db.collection('reviews')
+                .where('placeId', '==', placeId)
+                .get();
+            let ratingSum = 0;
+            let reviewCount = 0;
+
+            reviewsSnapshot.docs.forEach((reviewDocument) => {
+                const rating = reviewDocument.get('rating');
+                if (Number.isInteger(rating) && rating >= 1 && rating <= 5) {
+                    ratingSum += rating;
+                    reviewCount += 1;
+                }
+            });
+
+            const rating = reviewCount === 0
+                ? 0
+                : Number((ratingSum / reviewCount).toFixed(2));
+
+            await placeReference.update({
+                rating,
+                ratingSum,
+                reviewCount,
+            });
+
+            logger.info('Se recalcularon las estadísticas de reseñas del lugar.', {
+                placeId,
+                reviewCount,
+                rating,
+            });
+        }
+    }
+);
+
+exports.findNearbyPlaces = onCall(async (request) => {
+    if (!request.auth) {
+        throw new HttpsError(
+            'unauthenticated',
+            'Debes iniciar sesión para buscar lugares cercanos.'
+        );
+    }
+
+    const data = request.data || {};
+    const latitude = data.latitude;
+    const longitude = data.longitude;
+    const radiusMeters = data.radiusMeters;
+
+    if (!isValidCoordinate(latitude, longitude)) {
+        throw new HttpsError('invalid-argument', 'El centro del mapa no es válido.');
+    }
+
+    if (
+        !Number.isFinite(radiusMeters) ||
+        radiusMeters <= 0 ||
+        radiusMeters > MAX_NEARBY_RADIUS_METERS
+    ) {
+        throw new HttpsError(
+            'invalid-argument',
+            `El radio debe estar entre 1 y ${MAX_NEARBY_RADIUS_METERS} metros.`
+        );
+    }
+
+    try {
+        const placesSnapshot = await db.collection('places').get();
+        const places = placesSnapshot.docs
+            .map((placeDocument) => {
+                const placeData = placeDocument.data();
+                const coordinates = placeData.coordinates;
+                const placeLatitude = coordinates?.latitude;
+                const placeLongitude = coordinates?.longitude;
+
+                if (!isValidCoordinate(placeLatitude, placeLongitude)) {
+                    return null;
+                }
+
+                const distanceMeters = distanceBetweenMeters(
+                    latitude,
+                    longitude,
+                    placeLatitude,
+                    placeLongitude
+                );
+
+                if (distanceMeters > radiusMeters) {
+                    return null;
+                }
+
+                return {
+                    id: placeDocument.id,
+                    title: placeData.title || '',
+                    category: placeData.category || '',
+                    location: placeData.location || '',
+                    rating: Number.isFinite(placeData.rating) ? placeData.rating : 0,
+                    imageUrl: placeData.imageUrl || null,
+                    description: placeData.description || '',
+                    reviewCount: Number.isInteger(placeData.reviewCount)
+                        ? placeData.reviewCount
+                        : 0,
+                    coordinates: {
+                        latitude: placeLatitude,
+                        longitude: placeLongitude,
+                    },
+                    distanceMeters: Math.round(distanceMeters),
+                };
+            })
+            .filter((place) => place !== null)
+            .sort((placeA, placeB) => placeA.distanceMeters - placeB.distanceMeters)
+            .slice(0, MAX_NEARBY_RESULTS);
+
+        logger.info('Se completó la búsqueda de lugares cercanos.', {
+            placeCount: places.length,
+            radiusMeters,
+        });
+
+        return { places, radiusMeters };
+    } catch (error) {
+        logger.error('No se pudieron buscar lugares cercanos.', { error });
+        throw new HttpsError('internal', 'No se pudieron buscar lugares cercanos.');
+    }
+});
 

@@ -15,12 +15,16 @@ These notes reflect the repository source inspected on 2026-10-23. The source of
 ## Current trigger and data patterns
 
 - `updateUserInfoInReviews` listens to `users/{userId}` updates. It compares `avatarUrl` before and after, then queries `reviews` where `userId == userId` and updates `user.avatarUrl`. Writes are chunked into batches of at most 500.
+- `syncUserProfileSnapshots` listens to `users/{userId}` updates. When `name` or `username` changes, it pages through that author's reviews and comments and refreshes their embedded `user` snapshot; reviews also update the legacy top-level `authorName`. Writes are chunked below Firestore's 500-operation batch limit and retries are enabled.
+- `syncPlaceReviewStats` listens to writes on `reviews/{reviewId}`. It ignores changes unrelated to `rating` or `placeId`, then recomputes `places/{placeId}.rating`, `ratingSum`, and `reviewCount` from valid ratings in the current reviews collection. A single function instance processes these updates in series so redelivery repeats an absolute recomputation rather than incrementing totals twice.
+- `findNearbyPlaces` is an authenticated callable. It validates a center and a radius up to 100 km, checks each `places` document with a valid `coordinates` GeoPoint, computes the Haversine distance, and returns the nearest 50 matching places. The Android map calls it around the visible camera center with a 50 km radius. This scans the full places collection and fits the current small catalog; revisit the query strategy if the catalog grows substantially.
 - `sendFollowNotification` listens to creation of `users/{userId}/followers/{followerId}`. It loads both user documents, checks `users/{userId}.notificationPreferences.newFollowers === true`, then sends to `users/{userId}.fcmToken`.
 - `sendReviewLikeNotification` listens to creation of `reviews/{reviewId}/likes/{likerId}`. It loads the review, resolves the owner from `reviews/{reviewId}.userId`, skips missing/self likes, checks `users/{ownerId}.notificationPreferences.likesReceived === true`, then sends to the owner's `fcmToken`.
 - `sendNewReviewFromFollowingNotification` listens to creation of `reviews/{reviewId}`. It pages through `users/{authorId}/followers`, checks each follower's `notificationPreferences.newReviewsFromFollowing === true`, deduplicates FCM tokens, and sends multicast batches capped at 500 tokens.
 - `ProfileNotificationPreferences` stores `newReviewsFromFollowing` alongside `newFollowers`, `reviewComments`, and `likesReceived`; the Android profile editor persists the option under `users/{userId}.notificationPreferences`.
 - Follower and liker display names prefer `name`, then `username`, then the document ID.
 - The like notification includes `reviewId` in its FCM `data` payload. FCM data values must be strings; preserve this when adding fields.
+- Place rating and count are maintained from actual review documents by `syncPlaceReviewStats`; valid ratings are integer values from 1 through 5. A place without valid reviews is stored with `rating: 0`, `ratingSum: 0`, and `reviewCount: 0`.
 - Current handlers log failures but do not clear invalid tokens or configure explicit retry behavior. Do not assume either behavior exists.
 
 ## Important boundaries
