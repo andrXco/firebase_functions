@@ -1,0 +1,34 @@
+{
+  "cartagena_amurallada": {
+    "latitude": 10.4236,
+    "longitude": -75.5478,
+    "reference": "WaySpot PreviewDataPopular.kt"
+  },
+  "cerro_monserrate": {
+    "latitude": 4.6059,
+    "longitude": -74.0559,
+    "reference": "WaySpot PreviewDataPopular.kt"
+  },
+  "parque_tayrona": {
+    "latitude": 11.2825,
+    "longitude": -74.023611,
+    "reference": "https://old.parquesnacionales.gov.co/portal/wp-content/uploads/2018/03/Resol_217_281218_sgm.pdf",
+    "point": "Entrada Calabazo"
+  },
+  "piedra_del_penol": {
+    "latitude": 6.2205,
+    "longitude": -75.1766,
+    "reference": "https://piedrapark.co/sobre-piedrapark"
+  },
+  "playa_blanca": {
+    "latitude": 10.218511,
+    "longitude": -75.612286,
+    "reference": "https://commons.wikimedia.org/wiki/File:014_Playa_Blanca_Cartagena_Colombia.JPG",
+    "point": "Playa Blanca, Baru"
+  },
+  "valle_del_cocora": {
+    "latitude": 4.6375,
+    "longitude": -75.5672,
+    "reference": "WaySpot PreviewDataPopular.kt"
+  }
+}
